@@ -12,23 +12,13 @@
 #include <cstdlib>
 #include <unistd.h>
 #include <cstdint>
+#include <algorithm>
 
 
 #define SLOTSIZE    4096
 #define SLOTS       10
 
 struct io61_file;
-
-// io61_file* io61_fdopen(int fd, int mode);
-// io61_file* io61_open_check(const char* filename, int mode);
-// int io61_close(io61_file* f);
-// off_t io61_filesize(io61_file* f);
-// int io61_seek(io61_file* f, off_t pos);
-// int io61_readc(io61_file* f);
-// int io61_writec(io61_file* f, int ch);
-// ssize_t io61_read(io61_file* f, unsigned char* buf, size_t sz);
-// ssize_t io61_write(io61_file* f, const unsigned char* buf, size_t sz);
-// int io61_flush(io61_file* f);
 void cprofile_begin();
 void cprofile_end();
 struct carguments {
@@ -51,7 +41,6 @@ struct carguments {
 
 struct slot {
 
-    off_t half_buf = SLOTSIZE / 2;
     unsigned char buf[SLOTSIZE];
     
     // state variables that decribe the current state of 
@@ -83,6 +72,10 @@ struct cfile{
     slot slots[SLOTS];
     std::unordered_map<uintptr_t, int> slot_map;
     int fd, mode;
+
+    uintptr_t user_ofset = 0;
+    uintptr_t file_ofset = 0;
+    unsigned last_slot = 0;
     
 
     cfile(int _fd, int _mode){
@@ -90,9 +83,9 @@ struct cfile{
         mode = _mode;
     }
     
-    int find_slot(uintptr_t offset){
-        if (slot_map.find(offset % SLOTSIZE) != slot_map.end()){
-            return slot_map[offset % SLOTSIZE];
+    int find_slot(){
+        if (slot_map.find(user_ofset % SLOTSIZE) != slot_map.end()){
+            return slot_map[user_ofset % SLOTSIZE];
         }
         return -1;
     }
@@ -110,11 +103,11 @@ int cclose(cfile *file);
 
 // cread - reads sz bytes from a file opened by copen
 // and copies it to buf
-int cread(cfile *file, char *buf, size_t sz);
+size_t cread(cfile *file, unsigned char *buf, size_t sz);
 
 // cwrite - writes sz bytes from src to a file opened
 // by copen
-int cwrite(cfile *file, char *src, size_t sz);
+size_t cwrite(cfile *file, unsigned char *src, size_t sz);
 
 // creadc - returns one character from cache
 // or EOF if file has reached the end

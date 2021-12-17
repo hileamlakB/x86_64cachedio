@@ -1,47 +1,90 @@
 #include "x86_64cachedio.hh"
+#include <iostream>
 
+// copen
+cfile*  copen(const char* filename, int mode) {
+    int fd = -1;
+    if (filename) {
+        fd = open(filename, mode, mode);
+    } 
+    if (fd < 0)
+        return nullptr;
 
-#define SLOTSIZE    4096
-#define SLOTS       10
+    cfile *file = new cfile(fd, mode);
+    return file;
+}
 
-
-
-// cclose(f)
-//    Close the cfile `f` and release all its resources.
-
+// cclose
 int cclose(cfile* f) {
-   
+    cflush(f);
+    int s = close(f->fd);
     delete f;
-    return 0;
+    return s;
 }
 
+int cfill(cfile *file){
 
-// cread(f)
-//    Read a single (unsigned) character from `f` and return it. Returns EOF
-//    (which is -1) on error or end-of-file.
+    slot *slt = &file->slots[file->last_slot];
 
-int cread(cfile* f){
+    slt->reset();
+
+    // Cache from both sides, to improve reverse patterns
+    // try to cache SLOTSIZE/2 both forward and backward
+    off_t back = std::max((uintptr_t)0, file->file_ofset - SLOTSIZE/2);
+
+    off_t new_offset = lseek(file->fd, back, SEEK_SET);
+    assert(new_offset == back); // it may not always be back
+
+    size_t to_read = back + SLOTSIZE/2;
+    size_t red = read(file->fd, slt->buf, to_read);
+    if (red < 0)
+        return red;
     
-   return 0;
+    if (red < file->file_ofset - back){
+        // only the back ward cache is read
+        return -1;
+    }
+
+    slt->end = red;
+    slt->cur = file->file_ofset - new_offset;
+    slt->min_pointer = new_offset; 
+    slt->max_pointer = file->file_ofset + SLOTSIZE/2;
+
+    file->user_ofset = file->file_ofset;
+    file->file_ofset += SLOTSIZE / 2;
+    file->slot_map[file->user_ofset] = file->last_slot;
+    file->last_slot++;
+
+    assert(slt->check_state());
+
+    return red;
 }
 
+// cread
+size_t cread(cfile *file, unsigned char *buf, size_t sz){
 
-// cread(f, buf, sz)
-//    Read up to `sz` characters from `f` into `buf`. Returns the number of
-//    characters read on success; normally this is `sz`. Returns a short
-//    count, which might be zero, if the file ended before `sz` characters
-//    could be read. Returns -1 if an error occurred before any characters
-//    were read.
-
-ssize_t cread(cfile* f, unsigned char* buf, size_t sz) {
+    uintptr_t st = file->find_slot();
     
-    return 0;
+    if (st == -1)
+    {
+        int r;
+        if ((r = cfill(file)) == 0)
+            return EOF;
+        if (r < 0)
+            return r;
+    }
+   
+    st = file->find_slot();
+    
 
-    // Note: This function never returns -1 because `cread`
-    // does not distinguish between error and end-of-file.
-    // Your final version should return -1 if a system call indicates
-    // an error.
+    size_t to_read = std::min(sz, (size_t)SLOTSIZE);
+    slot *slt = &file->slots[st];
+
+    memcpy(buf, slt->buf + slt->beg, to_read); 
+    slt->beg += to_read;
+    return to_read;
 }
+
 
 
 // cwritec(f)
@@ -86,21 +129,7 @@ int cseek(cfile* f, off_t pos) {
 
 
 
-// copen(filename, mode)
-//    Open the file corresponding to `filename` and return its cfile *.
-//    returns nullptr if it fails
 
-cfile*  copen(const char* filename, int mode) {
-    int fd = -1;
-    if (filename) {
-        fd = open(filename, mode, mode);
-    } 
-    if (fd < 0)
-        return nullptr;
-
-    cfile *FILE = new cfile(fd, mode);
-    return FILE;
-}
 
 
 // cfilesize(f)
