@@ -9,7 +9,7 @@ The read api uses fully associated aligned caches to improve different access pa
 
 # Future todos
 
-[ ] Implement spetialized cache for writing too
-[ ] A read and write cache that compromises efficeny
-[ ] A seek api
-[ ] Fuzz test
+- [ ] Implement spetialized cache for writing too
+- [ ] A read and write cache that compromises efficeny
+- [ ] A seek api
+- [ ] Fuzz test
