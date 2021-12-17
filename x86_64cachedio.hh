@@ -1,5 +1,5 @@
-#ifndef IO61_HH
-#define IO61_HH
+#ifndef IOHH
+#define IOHH
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -18,25 +18,9 @@
 #define SLOTSIZE    4096
 #define SLOTS       10
 
-struct io61_file;
-void cprofile_begin();
-void cprofile_end();
-struct carguments {
-    size_t input_size;          // `-s` option: input size. Default SIZE_MAX
-    size_t block_size;          // `-b` option: block size. Default 0
-    size_t stride;              // `-t` option: stride. Default 1024
-    bool lines;                 // `-l` option: read by lines. Default false
-    const char* output_file;    // `-o` option: output file. Default nullptr
-    const char* input_file;     // input file. Default nullptr
-    std::vector<const char*> input_files;   // all input files
-    std::vector<const char*> output_files;  // all output files
-    const char* program_name;   // name of program
-    const char* opts;           // options string
-
-    carguments(int argc, char** argv, const char* opts);
-    void usage();
-};
-
+// flushing types
+#define SINGLE      1 // flush a single cache slot
+#define FULL        2 // flush all cache slots
 
 
 struct slot {
@@ -46,12 +30,15 @@ struct slot {
     // state variables that decribe the current state of 
     // of the cache buffer
     off_t beg = 0, cur = 0, end = 0;
+    bool written = false;
 
     // the maximum and minum adress this cache maps
     off_t max_pointer = 0, min_pointer = 0;
 
     void reset(){
         beg = cur = end = 0;
+        written = false;
+
     }
 
     bool check_state()
@@ -65,29 +52,48 @@ struct slot {
         
         return true;
     }
+
+    bool is_empty(){
+        return cur == 0 && end == 0;
+    }
+
+    bool is_full(){
+        return cur == end;
+    }
 };
 
 struct cfile{
 
     slot slots[SLOTS];
-    std::unordered_map<uintptr_t, int> slot_map;
+    std::unordered_map<off_t, int> slot_map;
+    std::unordered_map<int, off_t> slot_inverse_map;
     int fd, mode;
 
-    uintptr_t user_ofset = 0;
-    uintptr_t file_ofset = 0;
-    unsigned last_slot = 0;
+    off_t user_ofset = 0;
+    off_t file_ofset = 0;
+    int last_slot = 0;
     
-
     cfile(int _fd, int _mode){
         fd = _fd;
         mode = _mode;
     }
     
     int find_slot(){
-        if (slot_map.find(user_ofset % SLOTSIZE) != slot_map.end()){
-            return slot_map[user_ofset % SLOTSIZE];
+        if (slot_map.find(user_ofset / (SLOTSIZE)) != slot_map.end()){
+            return slot_map[user_ofset / (SLOTSIZE)];
         }
         return -1;
+    }
+
+    void set_slot(){
+        // maps the current user offset to the current slot
+        
+        if (slot_inverse_map.find(last_slot) != slot_inverse_map.end()){
+            slot_map.erase(slot_inverse_map[last_slot]);
+        }
+
+        slot_map[user_ofset  / (SLOTSIZE)] = last_slot;
+        slot_inverse_map[last_slot] = user_ofset  / (SLOTSIZE);
     }
 };
 
@@ -130,9 +136,17 @@ int cfread(cfile *file, char *buf, size_t sz);
 int cfwrite(cfile *file, char *src, size_t sz);
 
 // cflus - writes data in cache into file
-int cflush(cfile *file);
+// returns the number of bytes written
+// if succesfull returns full cache size
+int cflush(cfile *file, int type);
 
 // cfill - refills cache from file
 int cfill(cfile *file);
+
+
+
+
+void profile_begin();
+void profile_end();
 
 #endif

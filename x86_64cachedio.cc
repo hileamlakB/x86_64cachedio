@@ -5,7 +5,9 @@
 cfile*  copen(const char* filename, int mode) {
     int fd = -1;
     if (filename) {
-        fd = open(filename, mode, mode);
+        fd = open(filename, mode, S_IRWXU);
+        if (fd == -1)
+            perror("ERROR");
     } 
     if (fd < 0)
         return nullptr;
@@ -15,10 +17,13 @@ cfile*  copen(const char* filename, int mode) {
 }
 
 // cclose
-int cclose(cfile* f) {
-    cflush(f);
-    int s = close(f->fd);
-    delete f;
+int cclose(cfile* file) {
+    if (!file)
+        return 0;
+    
+    cflush(file, FULL);
+    int s = close(file->fd);
+    delete file;
     return s;
 }
 
@@ -28,19 +33,19 @@ int cfill(cfile *file){
 
     slt->reset();
 
-    // Cache from both sides, to improve reverse patterns
-    // try to cache SLOTSIZE/2 both forward and backward
-    off_t back = std::max((uintptr_t)0, file->file_ofset - SLOTSIZE/2);
-
-    off_t new_offset = lseek(file->fd, back, SEEK_SET);
-    assert(new_offset == back); // it may not always be back
-
-    size_t to_read = back + SLOTSIZE/2;
-    size_t red = read(file->fd, slt->buf, to_read);
+    // Cache aligne memory to improve reverse readding patterns
+    off_t x = (file->file_ofset / SLOTSIZE ) * SLOTSIZE;
+    off_t new_offset = x;
+    if (x != file->file_ofset)
+        new_offset = lseek(file->fd, x, SEEK_SET);
+    assert(new_offset == x); // check if lseek hasnt failed
+    
+    
+    size_t red = read(file->fd, slt->buf, SLOTSIZE);
     if (red < 0)
         return red;
     
-    if (red < file->file_ofset - back){
+    if (red < file->file_ofset - new_offset){
         // only the back ward cache is read
         return -1;
     }
@@ -48,13 +53,14 @@ int cfill(cfile *file){
     slt->end = red;
     slt->cur = file->file_ofset - new_offset;
     slt->min_pointer = new_offset; 
-    slt->max_pointer = file->file_ofset + SLOTSIZE/2;
+    slt->max_pointer = new_offset + red;
 
     file->user_ofset = file->file_ofset;
-    file->file_ofset += SLOTSIZE / 2;
-    file->slot_map[file->user_ofset] = file->last_slot;
-    file->last_slot++;
-
+    file->file_ofset = new_offset + red;
+    
+    file->set_slot();
+    
+    file->last_slot = (file->last_slot + 1) % SLOTS ;
     assert(slt->check_state());
 
     return red;
@@ -63,28 +69,81 @@ int cfill(cfile *file){
 // cread
 size_t cread(cfile *file, unsigned char *buf, size_t sz){
 
-    uintptr_t st = file->find_slot();
+    size_t all_red = 0;
+    int si = file->find_slot();
     
-    if (st == -1)
+    if (si == -1)
     {
+        if (sz > SLOTSIZE){
+            int red = read(file->fd, buf, sz);
+            if (red > 0)
+            {
+                file->file_ofset += red;
+                file->user_ofset += red;
+            }
+            return red == 0? EOF: red;
+        }
+            
         int r;
         if ((r = cfill(file)) == 0)
             return EOF;
         if (r < 0)
             return r;
     }
+
    
-    st = file->find_slot();
+    si = file->find_slot();
+    slot *slt = &file->slots[si];
+
+    if (slt->is_empty()){
+        int r;
+        if ((r = cfill(file)) == 0)
+            return EOF;
+        if (r < 0)
+            return r;
+    }
     
+    size_t to_read = (sz < slt->end - slt->cur)? sz : slt->end - slt->cur;
 
-    size_t to_read = std::min(sz, (size_t)SLOTSIZE);
-    slot *slt = &file->slots[st];
+    memcpy(buf, slt->buf + slt->cur, to_read); 
+    sz -= to_read;
+    buf += to_read;
+    all_red += to_read;
+    slt->cur += to_read;
+    file->user_ofset += to_read;
 
-    memcpy(buf, slt->buf + slt->beg, to_read); 
-    slt->beg += to_read;
-    return to_read;
+    if (sz > SLOTSIZE){
+        // after reading what was available directly read if cacheing isn't benefitial
+        // / is integer division so it will tell us how money 
+        // buffer sizes we will be reading
+        size_t direct_read = (sz / (SLOTSIZE)) * (SLOTSIZE);
+        int red = read(file->fd, buf, direct_read);
+        if (red < direct_read)
+            return red;
+        buf += red;
+        sz -= red;
+        all_red += red;
+        file->file_ofset += red;
+        file->user_ofset += red;
+    }
+
+    if (sz)
+    {
+        size_t red = cread(file, buf, sz);
+        if (red != EOF)
+            all_red += red;
+    }
+        
+
+    
+    return all_red;
 }
 
+// cwrite
+size_t cwrite(cfile *file, unsigned char *src, size_t sz) {
+    return 0;
+    
+}
 
 
 // cwritec(f)
@@ -101,10 +160,7 @@ int cwritec(cfile* f, int ch) {
 //    characters written on success; normally this is `sz`. Returns -1 if
 //    an error occurred before any characters were written.
 
-ssize_t cwrite(cfile* f, const unsigned char* buf, size_t sz) {
-    size_t nwritten = 0;
-    return nwritten;
-}
+
 
 
 // cflush(f)
@@ -112,7 +168,48 @@ ssize_t cwrite(cfile* f, const unsigned char* buf, size_t sz) {
 //    If `f` was opened read-only, cflush(f) may either drop all
 //    data buffered for reading, or do nothing.
 
-int cflush(cfile* f) {
+int cflush(cfile* file, int type = SINGLE) {
+    if (type == SINGLE){
+        int si = file->find_slot();
+        if (si == -1)
+            return 0;
+        
+        slot *slt = &file->slots[si];
+        off_t new_ofset = lseek(file->fd, slt->min_pointer, SEEK_SET);
+        assert(new_ofset == slt->min_pointer);
+        
+        
+        size_t writen = write(file->fd, slt->buf, SLOTSIZE);
+        assert(writen > 0);
+       
+        slt->cur = 0;
+        file->file_ofset = slt->min_pointer + writen; 
+
+        return writen;
+
+    }
+
+    if (type == FULL){
+        int written = 0;
+        for (auto& slot_idpair: file->slot_inverse_map){
+            if (file->slots[slot_idpair.first].written){
+                slot *slt = &file->slots[slot_idpair.first];
+                off_t new_ofset = lseek(file->fd, slt->min_pointer, SEEK_SET);
+                assert(new_ofset == slt->min_pointer);
+              
+                
+                size_t writen = write(file->fd, slt->buf, slt->cur);
+                assert(writen > 0);
+                written += writen;
+                slt->cur = 0;
+                file->file_ofset = slt->min_pointer + writen; 
+            }
+
+        }
+        
+        return written;
+    }
+
     
     return 0;
 }
